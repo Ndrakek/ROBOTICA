@@ -1,27 +1,40 @@
 #include <Arduino.h>
 
+// =================== TIEMPOS ===================
 unsigned long t1 = 0, t2 = 0;
-int dt_us = 2000;   // tiempo de muestreo 2ms (500 Hz)
+const int dt_us = 20000; // 2 ms (500 Hz) -> asegurate que sea 2000 si quieres 500Hz
 
-// ================= MOTOR R =================
-#define ENCODER_R_A 4
-#define ENCODER_R_B 5
+// =================== MOTOR R ===================
+#define ENC_R_A 4
+#define ENC_R_B 5
 const int senR1 = 7;
 const int senR2 = 6;
 volatile long pulseCountR = 0;
-const int channelR1 = 0;
-const int channelR2 = 1;
+const int PULSOS_REV_R = 11050;
+const float DEG_PER_PULSE_R = 360.0 / PULSOS_REV_R;
 
-// ================= MOTOR E =================
-#define ENCODER_E_A 8
-#define ENCODER_E_B 9
+// PID R
+float KpR = 1.0, KiR = 0.5, KdR = 0.06; // reduje Kd un poco para empezar
+float e_prev_R = 0.0, integral_R = 0.0;
+float th_des_R = 0.0;
+float d_filtered_R = 0.0;
+
+// =================== MOTOR E ===================
+#define ENC_E_A 8
+#define ENC_E_B 9
 const int senE1 = 10;
 const int senE2 = 11;
 volatile long pulseCountE = 0;
-const int channelE1 = 2;
-const int channelE2 = 3;
+const int PULSOS_REV_E = 11050;
+const float DEG_PER_PULSE_E = 360.0 / PULSOS_REV_E;
 
-// ================= MOTOR P (ULTRASÓNICO) =================
+// PID E
+float KpE = 1.0, KiE = 0.5, KdE = 0.06;
+float e_prev_E = 0.0, integral_E = 0.0;
+float th_des_E = 0.0;
+float d_filtered_E = 0.0;
+
+// =================== PLANAR (ULTRASÓNICO) ===================
 #define TRIG_PIN 17
 #define ECHO_PIN 18
 const int senP1 = 12;
@@ -29,264 +42,235 @@ const int senP2 = 13;
 const int channelP1 = 4;
 const int channelP2 = 5;
 
-// ================= CONFIGURACIÓN GENERAL =================
-const int PULSOS_REV = 11050;
-const float DEG_PER_PULSE = 360.0 / PULSOS_REV;
+float p_ref = 0.0;           // referencia (cm)
+float distancia_actual = 0.0;
+float dead_band = 0.2;       // cm
+int PWM_P = 180;             // intensidad fija del planar
+
+// =================== PWM CONFIG ===================
 const int freqPWM = 20000;
-const int pwmResolution = 8;
+const int pwmResolution = 8; // 8 bits -> 0..255
+const int chR1 = 0, chR2 = 1;
+const int chE1 = 2, chE2 = 3;
 
-// PID común
-float Kp = 2.0f, Ki = 1.5f, Kd = 0.6f;
+// =================== RECEPCIÓN SERIAL ===================
+String inputString = "";
+bool stringComplete = false;
 
-// ======== ESTADO PID R =========
-float eR_prev = 0, intR = 0;
-static float th_des_R = 0.0f;
-static float last_input_R = 0.0f;
-static bool last_input_R_init = false;
-
-// ======== ESTADO PID E =========
-float eE_prev = 0, intE = 0;
-static float th_des_E = 0.0f;
-static float last_input_E = 0.0f;
-static bool last_input_E_init = false;
-
-// ======== ESTADO PID P =========
-float eP_prev = 0, intP = 0;
-static float th_des_P = 0.0f;
-static float last_input_P = 0.0f;
-static bool last_input_P_init = false;
-
-// ================= FILTRO MEDIA MÓVIL PARA P =================
-#define N_FILTRO 5
-float bufferP[N_FILTRO] = {0};
-int indexP = 0;
-bool bufferLlenoP = false;
-
-float filtrarDistancia(float nuevaMuestra) {
-  bufferP[indexP] = nuevaMuestra;
-  indexP = (indexP + 1) % N_FILTRO;
-
-  int n = bufferLlenoP ? N_FILTRO : indexP;
-  if (indexP == 0) bufferLlenoP = true;
-
-  float suma = 0;
-  for (int i = 0; i < n; i++) suma += bufferP[i];
-  return suma / n;
-}
-
-// ================= ISR ENC R =================
-void IRAM_ATTR handleEncoderRA() {
-  int A = digitalRead(ENCODER_R_A);
-  int B = digitalRead(ENCODER_R_B);
-  if (A == B) pulseCountR++;
+// =================== ENCODER ISR ===================
+void IRAM_ATTR handleEncoderR_A() {
+  int a = digitalRead(ENC_R_A);
+  int b = digitalRead(ENC_R_B);
+  if (a == b) pulseCountR++;
   else pulseCountR--;
 }
-void IRAM_ATTR handleEncoderRB() {
-  int A = digitalRead(ENCODER_R_A);
-  int B = digitalRead(ENCODER_R_B);
-  if (A != B) pulseCountR++;
+void IRAM_ATTR handleEncoderR_B() {
+  int a = digitalRead(ENC_R_A);
+  int b = digitalRead(ENC_R_B);
+  if (a != b) pulseCountR++;
   else pulseCountR--;
 }
 
-// ================= ISR ENC E =================
-void IRAM_ATTR handleEncoderEA() {
-  int A = digitalRead(ENCODER_E_A);
-  int B = digitalRead(ENCODER_E_B);
-  if (A == B) pulseCountE++;
+void IRAM_ATTR handleEncoderE_A() {
+  int a = digitalRead(ENC_E_A);
+  int b = digitalRead(ENC_E_B);
+  if (a == b) pulseCountE++;
   else pulseCountE--;
 }
-void IRAM_ATTR handleEncoderEB() {
-  int A = digitalRead(ENCODER_E_A);
-  int B = digitalRead(ENCODER_E_B);
-  if (A != B) pulseCountE++;
+void IRAM_ATTR handleEncoderE_B() {
+  int a = digitalRead(ENC_E_A);
+  int b = digitalRead(ENC_E_B);
+  if (a != b) pulseCountE++;
   else pulseCountE--;
 }
 
-// ================= FUNCIONES =================
-int pidControl(float &th_des, float &last_input, bool &init,
-               float &e_prev, float &integral,
-               float medida, float consigna) {
-
-  if (!init) {
-    th_des = medida + (consigna - medida);
-    last_input = consigna;
-    init = true;
-  } else {
-    th_des += (consigna - last_input);
-    last_input = consigna;
-  }
-
-  float e = th_des - medida;
-  float Ts = dt_us / 1e6f;
-
-  integral += e * Ts;
-  integral = constrain(integral, -100.0f, 100.0f);
-
-  float derivative = (e - e_prev) / Ts;
-  float u = Kp * e + Ki * integral + Kd * derivative;
-  e_prev = e;
-
-  float usat = constrain(u, -12.0f, 12.0f);
-  float PWMf = usat * (255.0f / 12.0f);
-  PWMf = constrain(PWMf, -255.0f, 255.0f);
-
-  return (int)round(PWMf);
-}
-
-float leerDistanciaM() {
+// =================== FUNCIONES PLANAR ===================
+float medirDistancia() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
-
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  long duracion = pulseIn(ECHO_PIN, HIGH, 30000); // timeout 30ms
-  float distancia_cm = duracion * 0.034 / 2.0;
-  return distancia_cm / 100.0; // en metros
+  long duracion = pulseIn(ECHO_PIN, HIGH, 30000);
+  float distancia = duracion * 0.0343 / 2.0; // cm
+  return distancia;
 }
 
+void controlPlanar() {
+  distancia_actual = medirDistancia()/100;
+  float KpP = 5.0;
+  float error = distancia_actual - p_ref;
+  float u = KpP * error;
+  u = constrain(u, -100, 230); // ajustar a 8-bit
+
+  if (abs(error) < dead_band) {
+    u = 0;
+  }
+  if (u > 0) {
+    ledcWrite(channelP1, (int)u);
+    ledcWrite(channelP2, 0);
+  } else {
+    ledcWrite(channelP1, 0);
+    ledcWrite(channelP2, (int)(-u));
+  }
+}
+
+// Helper: wrap angle to [-180,180)
+float wrap180(float ang) {
+  float a = fmod(ang, 360.0f);
+  if (a >= 180.0f) a -= 360.0f;
+  if (a < -180.0f) a += 360.0f;
+  return a;
+}
+
+// shortest angle from current to target (both in degrees, -180..180)
+float angleErrorShortest(float target, float current_wrapped) {
+  float diff = target - current_wrapped;
+  if (diff > 180.0f) diff -= 360.0f;
+  if (diff < -180.0f) diff += 360.0f;
+  return diff;
+}
+
+// =================== SETUP ===================
 void setup() {
   Serial.begin(115200);
 
-  // encoder R
-  pinMode(ENCODER_R_A, INPUT_PULLUP);
-  pinMode(ENCODER_R_B, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_R_A), handleEncoderRA, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_R_B), handleEncoderRB, CHANGE);
+  // Encoders R y E
+  pinMode(ENC_R_A, INPUT_PULLUP);
+  pinMode(ENC_R_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_R_A), handleEncoderR_A, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_R_B), handleEncoderR_B, CHANGE);
 
-  // encoder E
-  pinMode(ENCODER_E_A, INPUT_PULLUP);
-  pinMode(ENCODER_E_B, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_E_A), handleEncoderEA, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_E_B), handleEncoderEB, CHANGE);
+  pinMode(ENC_E_A, INPUT_PULLUP);
+  pinMode(ENC_E_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_E_A), handleEncoderE_A, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_E_B), handleEncoderE_B, CHANGE);
 
-  // sensor ultrasónico
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-
-  // pwm R
-  ledcSetup(channelR1, freqPWM, pwmResolution);
-  ledcSetup(channelR2, freqPWM, pwmResolution);
-  ledcAttachPin(senR1, channelR1);
-  ledcAttachPin(senR2, channelR2);
-
-  // pwm E
-  ledcSetup(channelE1, freqPWM, pwmResolution);
-  ledcSetup(channelE2, freqPWM, pwmResolution);
-  ledcAttachPin(senE1, channelE1);
-  ledcAttachPin(senE2, channelE2);
-
-  // pwm P
+  // PWM channels
+  ledcSetup(chR1, freqPWM, pwmResolution);
+  ledcSetup(chR2, freqPWM, pwmResolution);
+  ledcSetup(chE1, freqPWM, pwmResolution);
+  ledcSetup(chE2, freqPWM, pwmResolution);
   ledcSetup(channelP1, freqPWM, pwmResolution);
   ledcSetup(channelP2, freqPWM, pwmResolution);
+
+  ledcAttachPin(senR1, chR1);
+  ledcAttachPin(senR2, chR2);
+  ledcAttachPin(senE1, chE1);
+  ledcAttachPin(senE2, chE2);
   ledcAttachPin(senP1, channelP1);
   ledcAttachPin(senP2, channelP2);
 
-  Serial.println("refR,angR,errorR,PWM_R,refE,angE,errorE,PWM_E,refP,posP,errorP,PWM_P,dt_us");
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 }
 
+// =================== LOOP ===================
 void loop() {
   t1 = micros();
 
-  // leer encoders
+  // === 1️⃣ Leer encoders ===
   noInterrupts();
   long countR = pulseCountR;
   long countE = pulseCountE;
   interrupts();
 
-  float angR = countR * DEG_PER_PULSE;
-  float angE = countE * DEG_PER_PULSE;
+  float angR = countR * DEG_PER_PULSE_R; // acumulado, puede ser >360
+  float angE = countE * DEG_PER_PULSE_E;
 
-  // leer sensor P con filtro media móvil
-  float medidaP = leerDistanciaM();
-  float posP = filtrarDistancia(medidaP);
+  // wrapped for display/control ([-180,180))
+  float angR_wrapped = wrap180(angR);
+  float angE_wrapped = wrap180(angE);
 
-  // recibir consignas p,r,e
-  static float consigna_p = 0.0f;     // en metros
-  static float consigna_r_deg = 0.0f; // en grados
-  static float consigna_e_deg = 0.0f; // en grados
-
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    float p, r, e;
-    if (sscanf(line.c_str(), "%f,%f,%f", &p, &r, &e) == 3) {
-      consigna_p = p;                            // metros
-      consigna_r_deg = (r * 180.0f / PI) * -1;   // rad → deg
-      consigna_e_deg = (e * 180.0f / PI);        // rad → deg
-    }
-  }
-
-  // aplicar PID R
-  int PWM_R = pidControl(th_des_R, last_input_R, last_input_R_init,
-                         eR_prev, intR, angR, consigna_r_deg);
-  if (PWM_R > 0) {
-    ledcWrite(channelR1, PWM_R);
-    ledcWrite(channelR2, 0);
-  } else if (PWM_R < 0) {
-    ledcWrite(channelR1, 0);
-    ledcWrite(channelR2, -PWM_R);
-  } else {
-    ledcWrite(channelR1, 0);
-    ledcWrite(channelR2, 0);
-  }
-
-  // aplicar PID E
-  int PWM_E = pidControl(th_des_E, last_input_E, last_input_E_init,
-                         eE_prev, intE, angE, consigna_e_deg);
-  if (PWM_E > 0) {
-    ledcWrite(channelE1, PWM_E);
-    ledcWrite(channelE2, 0);
-  } else if (PWM_E < 0) {
-    ledcWrite(channelE1, 0);
-    ledcWrite(channelE2, -PWM_E);
-  } else {
-    ledcWrite(channelE1, 0);
-    ledcWrite(channelE2, 0);
-  }
-
-  // aplicar PID P con dirección forzada + banda muerta
-  int PWM_P = pidControl(th_des_P, last_input_P, last_input_P_init,
-                         eP_prev, intP, posP, consigna_p);
-
-  float errorP = consigna_p - posP;
-  float deadband = 0.03; // ±3 cm
-
-  if (fabs(errorP) < deadband) {
-    PWM_P = 0;
-    ledcWrite(channelP1, 0);
-    ledcWrite(channelP2, 0);
-  } else {
-    PWM_P = abs(PWM_P);
-    if (posP > consigna_p) {
-      ledcWrite(channelP1, PWM_P);
-      ledcWrite(channelP2, 0);
+  // === 2️⃣ Leer referencias desde Serial ===
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    if (inChar == '\n') {
+      stringComplete = true;
     } else {
-      ledcWrite(channelP1, 0);
-      ledcWrite(channelP2, PWM_P);
+      inputString += inChar;
     }
   }
 
-  // esperar periodo fijo
+  if (stringComplete) {
+    stringComplete = false;
+    float p_ref_m, r_ref_rad, e_ref_rad;
+    int n = sscanf(inputString.c_str(), "%f,%f,%f", &p_ref_m, &r_ref_rad, &e_ref_rad);
+    inputString = "";
+
+    if (n == 3) {
+      // Convertir unidades
+      p_ref = p_ref_m;               // m -> cm (si envías metros)
+      float r_ref_deg = (r_ref_rad * 180.0 / PI) * (-1.0f);
+      float e_ref_deg = e_ref_rad * 180.0 / PI;
+
+      th_des_R = constrain(r_ref_deg, -180.0f, 180.0f);
+      th_des_E = constrain(e_ref_deg, -180.0f, 180.0f);
+    }
+  }
+
+  // === 3️⃣ Control PID R ===
+  float Ts = dt_us / 1e6f;
+  float eR = angleErrorShortest(th_des_R, angR_wrapped); // <-- USAR WRAPPED ANGLE
+  integral_R += eR * Ts;
+  integral_R = constrain(integral_R, -200.0f, 200.0f);
+  float dR_raw = (eR - e_prev_R) / Ts;
+  // filtro exponencial para derivada
+  const float alpha = 0.85; // mayor = más suavizado
+  d_filtered_R = alpha * d_filtered_R + (1.0f - alpha) * dR_raw;
+  float uR = KpR * eR + KiR * integral_R + KdR * d_filtered_R;
+  e_prev_R = eR;
+  float usatR = constrain(uR, -12.0f, 12.0f);
+
+  // mapa consistente a 8-bit
+  float PWMf_R = map((int)roundf(usatR*100), -1200, 1200, -255, 255); // ejemplo de escala
+  PWMf_R = constrain(PWMf_R, -255, 255);
+  int PWM_R = roundf(fabs(PWMf_R));
+
+  // === 4️⃣ Control PID E ===
+  float eE = angleErrorShortest(th_des_E, angE_wrapped);
+  integral_E += eE * Ts;
+  integral_E = constrain(integral_E, -200.0f, 200.0f);
+  float dE_raw = (eE - e_prev_E) / Ts;
+  d_filtered_E = alpha * d_filtered_E + (1.0f - alpha) * dE_raw;
+  float uE = KpE * eE + KiE * integral_E + KdE * d_filtered_E;
+  e_prev_E = eE;
+  float usatE = constrain(uE, -12.0f, 12.0f);
+  float PWMf_E = map((int)roundf(usatE*100), -1200, 1200, -255, 255);
+  PWMf_E = constrain(PWMf_E, -255, 255);
+  int PWM_E = roundf(fabs(PWMf_E));
+
+  // === 5️⃣ Salidas a los puentes H ===
+  // Motor R
+  if (PWMf_R > 0) { ledcWrite(chR1, PWM_R); ledcWrite(chR2, 0); }
+  else if (PWMf_R < 0) { ledcWrite(chR1, 0); ledcWrite(chR2, PWM_R); }
+  else { ledcWrite(chR1, 0); ledcWrite(chR2, 0); }
+
+  // Motor E
+  if (PWMf_E > 0) { ledcWrite(chE1, PWM_E); ledcWrite(chE2, 0); }
+  else if (PWMf_E < 0) { ledcWrite(chE1, 0); ledcWrite(chE2, PWM_E); }
+  else { ledcWrite(chE1, 0); ledcWrite(chE2, 0); }
+
+  // === 6️⃣ Control planar ===
+  controlPlanar();
+
+  // === 7️⃣ Mantener periodo fijo ===
   t2 = micros();
   while ((t2 - t1) < dt_us) t2 = micros();
   unsigned long delta_t = t2 - t1;
 
-  // debug
-  Serial.print(th_des_R); Serial.print(",");
-  Serial.print(fmod(angR,360.0f)); Serial.print(",");
-  Serial.print(th_des_R - angR); Serial.print(",");
-  Serial.print(PWM_R); Serial.print(",");
-
-  Serial.print(th_des_E); Serial.print(",");
-  Serial.print(fmod(angE,360.0f)); Serial.print(",");
-  Serial.print(th_des_E - angE); Serial.print(",");
-  Serial.print(PWM_E); Serial.print(",");
-
-  Serial.print(consigna_p); Serial.print(",");
-  Serial.print(posP); Serial.print(",");
-  Serial.print(errorP); Serial.print(",");
-  Serial.print(PWM_P); Serial.print(",");
-
+  // === 8️⃣ Enviar datos al Serial ===
+  Serial.print(p_ref);  Serial.print(",");
+  Serial.print(distancia_actual); Serial.print(",");
+  Serial.print(th_des_R);  Serial.print(",");
+  Serial.print(angR_wrapped); Serial.print(",");
+  Serial.print(eR);        Serial.print(",");
+  Serial.print(PWMf_R);    Serial.print(",");
+  Serial.print(th_des_E);  Serial.print(",");
+  Serial.print(angE_wrapped); Serial.print(",");
+  Serial.print(eE);        Serial.print(",");
+  Serial.print(PWMf_E);
+  Serial.print(",");
   Serial.println(delta_t);
 }
