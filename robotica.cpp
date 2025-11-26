@@ -14,22 +14,23 @@ const int PULSOS_REV_R = 11050;
 const float DEG_PER_PULSE_R = 360.0 / PULSOS_REV_R;
 
 // PID R
-float KpR = 1.0, KiR = 0.5, KdR = 0.06; // reduje Kd un poco para empezar
+float KpR = 1.0, KiR = 0 , KdR = 0.06; // reduje Kd un poco para empezar
 float e_prev_R = 0.0, integral_R = 0.0;
 float th_des_R = 0.0;
 float d_filtered_R = 0.0;
-
+float error1=0;
+float error2=0;
 // =================== MOTOR E ===================
 #define ENC_E_A 8
 #define ENC_E_B 9
 const int senE1 = 10;
 const int senE2 = 11;
 volatile long pulseCountE = 0;
-const int PULSOS_REV_E = 11050;
+const int PULSOS_REV_E = 15000;
 const float DEG_PER_PULSE_E = 360.0 / PULSOS_REV_E;
 
 // PID E
-float KpE = 1.0, KiE = 0.5, KdE = 0.06;
+float KpE = 1, KiE = 0, KdE = 0.06;
 float e_prev_E = 0.0, integral_E = 0.0;
 float th_des_E = 0.0;
 float d_filtered_E = 0.0;
@@ -42,14 +43,13 @@ const int senP2 = 13;
 const int channelP1 = 4;
 const int channelP2 = 5;
 
-float p_ref = 0.0;           // referencia (cm)
+float p_ref = 0.0;           
 float distancia_actual = 0.0;
-float dead_band = 0.2;       // cm
-int PWM_P = 180;             // intensidad fija del planar
-
+float dead_band = 0.01;       
+int PWM_P = 180;             
 // =================== PWM CONFIG ===================
 const int freqPWM = 20000;
-const int pwmResolution = 8; // 8 bits -> 0..255
+const int pwmResolution = 8; 
 const int chR1 = 0, chR2 = 1;
 const int chE1 = 2, chE2 = 3;
 
@@ -98,21 +98,21 @@ float medirDistancia() {
 }
 
 void controlPlanar() {
-  distancia_actual = medirDistancia()/100;
+  distancia_actual = ((medirDistancia()-0.10)/100)-0.10;
   float KpP = 5.0;
   float error = distancia_actual - p_ref;
   float u = KpP * error;
-  u = constrain(u, -100, 230); // ajustar a 8-bit
+  u = constrain(abs(u), 190, 240); // ajustar a 8-bit
 
   if (abs(error) < dead_band) {
     u = 0;
   }
-  if (u > 0) {
-    ledcWrite(channelP1, (int)u);
+  if (error > 0) {
+    ledcWrite(channelP1, u);
     ledcWrite(channelP2, 0);
-  } else {
+  } else if(error<0){
     ledcWrite(channelP1, 0);
-    ledcWrite(channelP2, (int)(-u));
+    ledcWrite(channelP2, (u));
   }
 }
 
@@ -213,6 +213,7 @@ void loop() {
   // === 3️⃣ Control PID R ===
   float Ts = dt_us / 1e6f;
   float eR = angleErrorShortest(th_des_R, angR_wrapped); // <-- USAR WRAPPED ANGLE
+  error1=th_des_R-angR_wrapped;
   integral_R += eR * Ts;
   integral_R = constrain(integral_R, -200.0f, 200.0f);
   float dR_raw = (eR - e_prev_R) / Ts;
@@ -230,6 +231,7 @@ void loop() {
 
   // === 4️⃣ Control PID E ===
   float eE = angleErrorShortest(th_des_E, angE_wrapped);
+   error2=th_des_E-angE_wrapped;
   integral_E += eE * Ts;
   integral_E = constrain(integral_E, -200.0f, 200.0f);
   float dE_raw = (eE - e_prev_E) / Ts;
@@ -261,16 +263,9 @@ void loop() {
   unsigned long delta_t = t2 - t1;
 
   // === 8️⃣ Enviar datos al Serial ===
-  Serial.print(p_ref);  Serial.print(",");
-  Serial.print(distancia_actual); Serial.print(",");
-  Serial.print(th_des_R);  Serial.print(",");
-  Serial.print(angR_wrapped); Serial.print(",");
-  Serial.print(eR);        Serial.print(",");
-  Serial.print(PWMf_R);    Serial.print(",");
-  Serial.print(th_des_E);  Serial.print(",");
-  Serial.print(angE_wrapped); Serial.print(",");
-  Serial.print(eE);        Serial.print(",");
-  Serial.print(PWMf_E);
+  Serial.print(error1);
   Serial.print(",");
-  Serial.println(delta_t);
+  Serial.println(error2);
+
+
 }
